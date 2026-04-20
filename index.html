@@ -1,0 +1,517 @@
+import { useState, useCallback } from “react”;
+
+const MONTHS_JP = [“1月”,“2月”,“3月”,“4月”,“5月”,“6月”,“7月”,“8月”,“9月”,“10月”,“11月”,“12月”];
+
+// 主菜キーワード（優先度高）
+const MAIN_DISH = [“ハンバーグ”,“唐揚げ”,“コロッケ”,“チキンステーキ”,“ステーキ”,“グラタン”,“シチュー”,“カレー”,“酢豚”,“麻婆”,“エビチリ”,“油淋鶏”,“よだれ鶏”,“チキン”,“肉団子”,“肉じゃが”,“ポークビーンズ”,“ポトフ”,“おでん”,“ロールキャベツ”,“餃子”,“春巻”,“ラザニア”,“ミートソース”,“ハヤシ”,“ビビンバ”,“タコライス”,“ヤンニョム”,“天ぷら”,“フリッター”,“竜田”,“肉巻”,“野菜の肉巻”,“豚肉梅”,“豚バラ”,“豚キムチ”,“チャプチェ”,“ビーフン”,“牛丼”,“鶏そぼろ”,“鮭フレーク”,“照り焼き”,“みぞれ煮”,“煮”,“揚げ”,“炒め”,“焼き”,“蒸し”,“つくね”,“ナゲット”,“メンチカツ”,“チキンカツ”,“鶏カツ”,“チキンライス”,“オムライス”,“ニョッキ”,“キッシュ”,“シェパードパイ”,“ミートグラタン”,“ローストビーフ”,“石狩鍋”,“肉じゃが”,“鍋”,“丼”,“そぼろ”,“鮭”,“ぶり”,“鯖”,“魚”,“エビ”,“えび”];
+
+// デザートキーワード
+const DESSERT = [“寒天”,“ドーナツ”,“ケーキ”,“スイートポテト”,“コンポート”,“プリン”,“マフィン”,“クッキー”,“ゼリー”,“アイス”,“ホットケーキ”,“レーズン”,“オールレーズン”,“オールさつまいも”,“バナナ”,“いちご牛乳”,“スコーン”,“タルト”];
+
+function classifyItem(name) {
+for (const kw of DESSERT) if (name.includes(kw)) return “dessert”;
+for (const kw of MAIN_DISH) if (name.includes(kw)) return “main”;
+return “side”;
+}
+
+function extractVisits(text, names) {
+const lines = text.split(”\n”);
+const visits = [];
+let current = null;
+for (let i = 0; i < lines.length; i++) {
+const line = lines[i].trim();
+const headerMatch = line.match(/^(\d+)/(\d+)\s*(.+)/);
+if (headerMatch) {
+const month = parseInt(headerMatch[1]);
+const rawName = headerMatch[3].replace(/[　\s].*/g, “”).trim();
+if (current) visits.push(current);
+const matchedName = names.find(n => rawName.includes(n));
+current = matchedName ? { month, name: matchedName, lines: [] } : null;
+continue;
+}
+if (current) current.lines.push(lines[i]);
+}
+if (current) visits.push(current);
+return visits;
+}
+
+function parseMenuItems(visitLines) {
+const items = [];
+let menuName = null;
+let ingredientLines = [];
+const flush = () => {
+if (!menuName) return;
+const raw = ingredientLines.join(” “).trim();
+const match = raw.match(/（([^）]+)）/);
+items.push({ name: menuName, ingredients: match ? match[1].trim() : “” });
+menuName = null;
+ingredientLines = [];
+};
+for (const line of visitLines) {
+const trimmed = line.trim();
+if (!trimmed) { flush(); continue; }
+const nameMatch = trimmed.match(/^◯\s*(.+)/);
+if (nameMatch) {
+flush();
+const rest = nameMatch[1];
+if (rest.match(/（[^）]*）/)) {
+menuName = rest.replace(/（.*$/, “”).trim();
+ingredientLines.push(rest.replace(/^[^（]*/, “”));
+} else {
+menuName = rest.replace(/\s*（.*/, “”).replace(/\s*(.*/, “”).trim();
+}
+} else if (menuName) {
+ingredientLines.push(trimmed);
+}
+}
+flush();
+return items;
+}
+
+function formatIngredients(raw) {
+if (!raw) return “”;
+return raw.replace(/[　\s]+/g, “ “).replace(/[、，,]/g, “ “).trim();
+}
+
+const CATEGORY_META = {
+main:    { label: “主菜”,     color: “#e94560”, emoji: “🍖” },
+side:    { label: “副菜”,     color: “#0f9b8e”, emoji: “🥗” },
+dessert: { label: “デザート”, color: “#a855f7”, emoji: “🍮” },
+};
+
+export default function App() {
+const [fileText, setFileText] = useState(””);
+const [fileName, setFileName] = useState(””);
+const [allNames, setAllNames] = useState([]);
+const [selectedNames, setSelectedNames] = useState([]);
+const [excludeMonths, setExcludeMonths] = useState([]);
+const [itemsByCategory, setItemsByCategory] = useState({ main: [], side: [], dessert: [] });
+const [selected, setSelected] = useState([]);
+const [result, setResult] = useState(””);
+const [step, setStep] = useState(1);
+const [copied, setCopied] = useState(false);
+const [search, setSearch] = useState(””);
+
+const handleFile = useCallback((e) => {
+const file = e.target.files[0];
+if (!file) return;
+setFileName(file.name);
+const reader = new FileReader();
+reader.onload = (ev) => {
+const text = ev.target.result;
+setFileText(text);
+const nameSet = new Set();
+for (const line of text.split(”\n”)) {
+const m = line.trim().match(/^\d+/\d+\s+(.+)/);
+if (m) {
+const n = m[1].replace(/[　\s].*/g, “”).replace(/さん.*/, “さん”).trim();
+if (n.endsWith(“さん”)) nameSet.add(n.replace(“さん”, “”));
+}
+}
+setAllNames([…nameSet].sort());
+setStep(2);
+};
+reader.readAsText(file, “utf-8”);
+}, []);
+
+const toggleName = (name) =>
+setSelectedNames(prev => prev.includes(name) ? prev.filter(n => n !== name) : […prev, name]);
+
+const toggleMonth = (m) =>
+setExcludeMonths(prev => prev.includes(m) ? prev.filter(x => x !== m) : […prev, m]);
+
+const handleExtract = () => {
+if (selectedNames.length === 0 || !fileText) return;
+const visits = extractVisits(fileText, selectedNames);
+const filtered = visits.filter(v => !excludeMonths.includes(v.month));
+const seen = new Set();
+const cats = { main: [], side: [], dessert: [] };
+for (const v of filtered) {
+for (const item of parseMenuItems(v.lines)) {
+if (item.name && !seen.has(item.name)) {
+seen.add(item.name);
+const cat = classifyItem(item.name);
+cats[cat].push(item);
+}
+}
+}
+setItemsByCategory(cats);
+setSelected([]);
+setSearch(””);
+setStep(3);
+};
+
+const allItems = […itemsByCategory.main, …itemsByCategory.side, …itemsByCategory.dessert];
+
+const toggleItem = (name) =>
+setSelected(prev => prev.includes(name) ? prev.filter(n => n !== name) : […prev, name]);
+
+const moveUp = (idx) => {
+if (idx === 0) return;
+setSelected(prev => { const a=[…prev]; [a[idx-1],a[idx]]=[a[idx],a[idx-1]]; return a; });
+};
+const moveDown = (idx) => {
+setSelected(prev => {
+if (idx === prev.length-1) return prev;
+const a=[…prev]; [a[idx],a[idx+1]]=[a[idx+1],a[idx]]; return a;
+});
+};
+
+const generateOutput = () => {
+if (selected.length === 0) return;
+const lines = selected.map(name => {
+const item = allItems.find(i => i.name === name);
+const ingr = formatIngredients(item?.ingredients || “”);
+return `◯${name}\n（${ingr}）\n`;
+});
+setResult(lines.join(”\n”));
+setStep(4);
+};
+
+const handleCopy = () => {
+navigator.clipboard.writeText(result);
+setCopied(true);
+setTimeout(() => setCopied(false), 2000);
+};
+
+const getCategoryColor = (name) => {
+const cat = classifyItem(name);
+return CATEGORY_META[cat].color;
+};
+
+return (
+<div style={{
+minHeight: “100vh”,
+background: “#0e0e1a”,
+fontFamily: “‘Hiragino Kaku Gothic ProN’, ‘Noto Sans JP’, sans-serif”,
+color: “#e8e8f0”,
+}}>
+{/* ヘッダー */}
+<div style={{
+background: “linear-gradient(135deg, #16213e 0%, #0f3460 100%)”,
+borderBottom: “2px solid #e94560”,
+padding: “18px 20px”,
+display: “flex”, alignItems: “center”, gap: “12px”,
+}}>
+<div style={{
+width: “38px”, height: “38px”, background: “#e94560”,
+borderRadius: “10px”, display: “flex”, alignItems: “center”,
+justifyContent: “center”, fontSize: “18px”, flexShrink: 0,
+}}>🍱</div>
+<div style={{ flex: 1 }}>
+<h1 style={{ margin: 0, fontSize: “16px”, fontWeight: “700” }}>メニュー抽出ツール</h1>
+<p style={{ margin: 0, fontSize: “10px”, color: “#a0a0c0” }}>主菜・副菜・デザート分類対応版</p>
+</div>
+<div style={{ display: “flex”, gap: “5px” }}>
+{[“ファイル”,“設定”,“選択”,“出力”].map((label, i) => (
+<div key={i} style={{ display: “flex”, flexDirection: “column”, alignItems: “center”, gap: “3px” }}>
+<div style={{
+width: “24px”, height: “24px”, borderRadius: “50%”,
+background: step > i+1 ? “#e94560” : step === i+1 ? “#e94560” : “#2a2a4a”,
+border: step === i+1 ? “2px solid #ff7c9c” : “2px solid transparent”,
+display: “flex”, alignItems: “center”, justifyContent: “center”,
+fontSize: “10px”, fontWeight: “700”,
+color: step >= i+1 ? “#fff” : “#555”,
+boxShadow: step === i+1 ? “0 0 10px rgba(233,69,96,0.5)” : “none”,
+}}>
+{step > i+1 ? “✓” : i+1}
+</div>
+<span style={{ fontSize: “9px”, color: step === i+1 ? “#e94560” : “#555” }}>{label}</span>
+</div>
+))}
+</div>
+</div>
+
+```
+  <div style={{ maxWidth: "680px", margin: "0 auto", padding: "20px 14px" }}>
+
+    {/* STEP 1 */}
+    {step === 1 && (
+      <div style={{ animation: "fadeIn 0.4s ease" }}>
+        <label style={{
+          display: "flex", flexDirection: "column", alignItems: "center",
+          justifyContent: "center",
+          border: "2px dashed #e94560", borderRadius: "16px",
+          padding: "56px 24px", cursor: "pointer",
+          background: "rgba(233,69,96,0.04)",
+        }}>
+          <input type="file" accept=".txt" onChange={handleFile} style={{ display: "none" }} />
+          <div style={{ fontSize: "42px", marginBottom: "12px" }}>📂</div>
+          <div style={{ fontSize: "15px", fontWeight: "600", marginBottom: "6px" }}>テキストファイルを選択</div>
+          <div style={{ fontSize: "12px", color: "#888" }}>まとめファイル（.txt）をタップ</div>
+        </label>
+      </div>
+    )}
+
+    {/* STEP 2 */}
+    {step === 2 && (
+      <div style={{ animation: "fadeIn 0.4s ease" }}>
+        <div style={{
+          background: "#16213e", borderRadius: "10px", padding: "8px 14px",
+          marginBottom: "12px", border: "1px solid #2a2a4a",
+          fontSize: "11px", color: "#a0a0c0",
+        }}>📄 {fileName}</div>
+
+        <Card title={`お客様を選ぶ（${selectedNames.length}名）`}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "7px" }}>
+            {allNames.map(n => (
+              <ToggleChip key={n} label={`${n}さん`}
+                selected={selectedNames.includes(n)}
+                onClick={() => toggleName(n)} />
+            ))}
+          </div>
+          {selectedNames.length > 0 && (
+            <div style={{ marginTop: "8px", fontSize: "12px", color: "#e94560" }}>
+              選択中：{selectedNames.map(n => `${n}さん`).join("・")}
+            </div>
+          )}
+        </Card>
+
+        <Card title={`除外する月（${excludeMonths.length}ヶ月）`}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "7px" }}>
+            {MONTHS_JP.map((m, i) => (
+              <ToggleChip key={i} label={m} accent="#f0a500"
+                selected={excludeMonths.includes(i+1)}
+                onClick={() => toggleMonth(i+1)} />
+            ))}
+          </div>
+          <div style={{ marginTop: "8px", fontSize: "11px", color: excludeMonths.length > 0 ? "#f0a500" : "#555" }}>
+            {excludeMonths.length > 0
+              ? `除外：${excludeMonths.sort((a,b)=>a-b).map(m=>`${m}月`).join("・")}`
+              : "※ 選択なしの場合は全月が対象"}
+          </div>
+        </Card>
+
+        <button onClick={handleExtract} disabled={selectedNames.length === 0}
+          style={{ ...primaryBtn, opacity: selectedNames.length > 0 ? 1 : 0.4,
+            cursor: selectedNames.length > 0 ? "pointer" : "not-allowed" }}>
+          メニューを抽出する →
+        </button>
+      </div>
+    )}
+
+    {/* STEP 3 */}
+    {step === 3 && (
+      <div style={{ animation: "fadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: "14px" }}>
+              {selectedNames.map(n=>`${n}さん`).join("・")}
+            </h2>
+            <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#a0a0c0" }}>
+              {allItems.length}品 抽出　／　{selected.length}品 選択中
+            </p>
+          </div>
+          <button onClick={() => setStep(2)} style={ghostBtn}>← 戻る</button>
+        </div>
+
+        {/* 選択済みサマリー */}
+        {selected.length > 0 && (
+          <Card title={`選択中 ${selected.length}品（↑↓で並び替え・✕で削除）`} accent="#f0a500">
+            <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+              {selected.map((name, idx) => {
+                const color = getCategoryColor(name);
+                const cat = classifyItem(name);
+                return (
+                  <div key={name} style={{
+                    display: "flex", alignItems: "center", gap: "8px",
+                    padding: "7px 10px",
+                    background: `${color}15`,
+                    border: `1px solid ${color}`,
+                    borderRadius: "8px",
+                  }}>
+                    <span style={{ fontSize: "10px", color, fontWeight: "700", minWidth: "16px" }}>{idx+1}</span>
+                    <span style={{ fontSize: "10px", background: `${color}33`, color, padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
+                      {CATEGORY_META[cat].emoji}
+                    </span>
+                    <span style={{ flex: 1, fontSize: "13px" }}>◯{name}</span>
+                    <div style={{ display: "flex", gap: "4px" }}>
+                      <MiniBtn onClick={() => moveUp(idx)} disabled={idx === 0}>↑</MiniBtn>
+                      <MiniBtn onClick={() => moveDown(idx)} disabled={idx === selected.length-1}>↓</MiniBtn>
+                      <MiniBtn onClick={() => toggleItem(name)} color="#e94560">✕</MiniBtn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
+
+        {/* 検索 */}
+        <input
+          type="text" value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="メニュー名・材料で絞り込み…"
+          style={{
+            width: "100%", padding: "10px 14px", marginBottom: "10px",
+            background: "#16213e", border: "1px solid #2a2a4a",
+            borderRadius: "10px", color: "#e8e8f0",
+            fontSize: "13px", fontFamily: "inherit",
+            boxSizing: "border-box", outline: "none",
+          }}
+        />
+
+        {/* カテゴリ別リスト */}
+        {(["main","side","dessert"]).map(cat => {
+          const meta = CATEGORY_META[cat];
+          const items = itemsByCategory[cat].filter(item =>
+            search === "" || item.name.includes(search) || item.ingredients.includes(search)
+          );
+          if (items.length === 0 && search !== "") return null;
+          const selectedInCat = selected.filter(n => classifyItem(n) === cat);
+          return (
+            <Card key={cat}
+              title={`${meta.emoji} ${meta.label}（${items.length}品・${selectedInCat.length}品選択中）`}
+              accent={meta.color}>
+              {items.length === 0
+                ? <p style={{ color: "#666", fontSize: "12px", margin: 0 }}>なし</p>
+                : <div style={{ display: "flex", flexDirection: "column", gap: "5px", maxHeight: "40vh", overflowY: "auto" }}>
+                    {items.map(item => {
+                      const isSelected = selected.includes(item.name);
+                      return (
+                        <div key={item.name} onClick={() => toggleItem(item.name)} style={{
+                          display: "flex", alignItems: "flex-start", gap: "10px",
+                          padding: "8px 12px",
+                          background: isSelected ? `${meta.color}20` : "rgba(255,255,255,0.02)",
+                          border: `1px solid ${isSelected ? meta.color : "#2a2a4a"}`,
+                          borderRadius: "8px",
+                          cursor: "pointer", transition: "all 0.15s",
+                          userSelect: "none",
+                        }}>
+                          <span style={{
+                            width: "16px", height: "16px", borderRadius: "50%", flexShrink: 0,
+                            border: `2px solid ${isSelected ? meta.color : "#444"}`,
+                            background: isSelected ? meta.color : "transparent",
+                            marginTop: "2px",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            fontSize: "9px", color: "#fff",
+                          }}>
+                            {isSelected ? "✓" : ""}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: "13px", color: isSelected ? "#fff" : "#c0c0d8", fontWeight: isSelected ? "600" : "400" }}>
+                              ◯{item.name}
+                            </div>
+                            {item.ingredients && (
+                              <div style={{ fontSize: "11px", color: "#666", marginTop: "2px", wordBreak: "break-all" }}>
+                                （{item.ingredients.substring(0, 55)}{item.ingredients.length > 55 ? "…" : ""}）
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+              }
+            </Card>
+          );
+        })}
+
+        <button onClick={generateOutput} disabled={selected.length === 0}
+          style={{ ...primaryBtn, opacity: selected.length > 0 ? 1 : 0.4,
+            cursor: selected.length > 0 ? "pointer" : "not-allowed" }}>
+          {selected.length > 0 ? `${selected.length}品を出力する →` : "メニューを選んでください"}
+        </button>
+      </div>
+    )}
+
+    {/* STEP 4 */}
+    {step === 4 && (
+      <div style={{ animation: "fadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+          <h2 style={{ margin: 0, fontSize: "15px" }}>出力テキスト（{selected.length}品）</h2>
+          <button onClick={() => setStep(3)} style={ghostBtn}>← 選び直す</button>
+        </div>
+        <div style={{
+          background: "#0d1117", border: "1px solid #2a2a4a",
+          borderRadius: "12px", padding: "18px",
+          fontFamily: "'Hiragino Kaku Gothic ProN', sans-serif",
+          fontSize: "14px", lineHeight: "1.9",
+          whiteSpace: "pre-wrap", color: "#e8e8f0",
+          marginBottom: "14px", minHeight: "160px",
+        }}>
+          {result}
+        </div>
+        <button onClick={handleCopy}
+          style={{ ...primaryBtn, background: copied ? "linear-gradient(135deg, #0f9b8e, #0dcfbe)" : undefined }}>
+          {copied ? "✓ コピーしました！" : "📋 テキストをコピー"}
+        </button>
+        <button
+          onClick={() => { setStep(1); setFileText(""); setFileName(""); setAllNames([]); setSelectedNames([]); setExcludeMonths([]); setResult(""); setSelected([]); }}
+          style={{ ...ghostBtn, display: "block", width: "100%", marginTop: "10px", textAlign: "center", padding: "10px" }}>
+          最初からやり直す
+        </button>
+      </div>
+    )}
+  </div>
+
+  <style>{`
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    input::placeholder { color: #555; }
+  `}</style>
+</div>
+```
+
+);
+}
+
+function ToggleChip({ label, selected, onClick, accent = “#e94560” }) {
+return (
+<button onClick={onClick} style={{
+padding: “6px 13px”, borderRadius: “20px”,
+border: `1.5px solid ${selected ? accent : "#2a2a4a"}`,
+background: selected ? `${accent}22` : “transparent”,
+color: selected ? accent : “#a0a0c0”,
+fontSize: “13px”, fontWeight: selected ? “700” : “400”,
+cursor: “pointer”, fontFamily: “inherit”, transition: “all 0.15s”,
+}}>
+{selected ? “✓ “ : “”}{label}
+</button>
+);
+}
+
+function Card({ title, children, accent = “#e94560” }) {
+return (
+<div style={{
+background: “#16213e”, border: “1px solid #2a2a4a”,
+borderRadius: “14px”, padding: “16px”, marginBottom: “12px”,
+}}>
+<h3 style={{
+margin: “0 0 10px”, fontSize: “11px”, fontWeight: “700”,
+color: accent, textTransform: “uppercase”, letterSpacing: “0.06em”,
+}}>{title}</h3>
+{children}
+</div>
+);
+}
+
+function MiniBtn({ onClick, disabled, children, color = “#a0a0c0” }) {
+return (
+<button onClick={e => { e.stopPropagation(); if (!disabled) onClick(); }} style={{
+width: “24px”, height: “24px”, borderRadius: “6px”,
+border: `1px solid ${disabled ? "#2a2a4a" : color}`,
+background: “transparent”,
+color: disabled ? “#333” : color,
+fontSize: “11px”, cursor: disabled ? “default” : “pointer”,
+display: “flex”, alignItems: “center”, justifyContent: “center”,
+fontFamily: “inherit”, padding: 0,
+}}>
+{children}
+</button>
+);
+}
+
+const primaryBtn = {
+width: “100%”, padding: “13px”,
+background: “linear-gradient(135deg, #e94560, #c62a47)”,
+border: “none”, borderRadius: “12px”,
+color: “#fff”, fontSize: “14px”, fontWeight: “700”,
+cursor: “pointer”, fontFamily: “inherit”,
+letterSpacing: “0.03em”, marginBottom: “8px”, transition: “all 0.2s”,
+};
+
+const ghostBtn = {
+background: “transparent”, border: “1px solid #2a2a4a”,
+borderRadius: “8px”, color: “#a0a0c0”, fontSize: “13px”,
+cursor: “pointer”, padding: “6px 12px”, fontFamily: “inherit”,
+};
